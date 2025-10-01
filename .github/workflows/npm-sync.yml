@@ -1,77 +1,60 @@
-name: NPM Package Sync
+name: NPM Sync with Full Config
 
 on:
   workflow_dispatch:
     inputs:
       package_list:
-        description: 'Package list (format: name:version,name:version)'
+        description: 'Package list (name:version,name:version)'
         required: true
-        default: 'n8n:1.112.6,express:4.18.2'
-      target_registry:
-        description: 'Target registry URL'
-        required: true
-        default: 'https://packages.aliyun.com/675f933120a07de19c7c12ea/npm/npm-registry/'
+        default: 'lodash:4.17.21'
 
 jobs:
-  sync-packages:
+  sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '20'
-
-      - name: Sync packages to target registry
+          
+      - name: Sync with full npmrc
         env:
           ALIYUN_TOKEN: ${{ secrets.ALIYUN_NPM_TOKEN }}
         run: |
-          echo "Starting package sync..."
-          echo "Package list: ${{ github.event.inputs.package_list }}"
-          echo "Target registry: ${{ github.event.inputs.target_registry }}"
-          
-          # 创建 .npmrc 文件配置目标仓库认证
-          cat > .npmrc << EOF
-          registry=${{ github.event.inputs.target_registry }}
-          //packages.aliyun.com/675f933120a07de19c7c12ea/npm/npm-registry/:_authToken=$ALIYUN_TOKEN
+          # 创建完整的 .npmrc
+          cat > .npmrc << 'EOF'
+          cache=/home/runner/.npm
+          registry=https://packages.aliyun.com/675f933120a07de19c7c12ea/npm/npm-registry/
           always-auth=true
+          //packages.aliyun.com/675f933120a07de19c7c12ea/npm/npm-registry/:_authToken=${ALIYUN_TOKEN}
+          @nilpotenter:registry=https://packages.aliyun.com/675f933120a07de19c7c12ea/npm/npm-registry/
+          sass_binary_site=https://npmmirror.com/mirrors/node-sass/
+          phantomjs_cdnurl=https://cdn.npmmirror.com/binaries/phantomjs
+          electron_mirror=https://cdn.npmmirror.com/binaries/electron/
+          sqlite3_binary_host_mirror=https://foxgis.oss-cn-shanghai.aliyuncs.com/
+          chromedriver_cdnurl=https://cdn.npmmirror.com/binaries/chromedriver
           EOF
           
-          # 分割包列表并逐个处理
-          IFS=',' read -ra PACKAGE_SPECS <<< "${{ github.event.inputs.package_list }}"
+          # 处理包列表
+          IFS=',' read -ra PACKAGES <<< "${{ github.event.inputs.package_list }}"
           
-          for spec in "${PACKAGE_SPECS[@]}"; do
-            echo "Processing: $spec"
-            
-            # 分割包名和版本
+          for spec in "${PACKAGES[@]}"; do
             IFS=':' read -ra PARTS <<< "$spec"
-            PACKAGE_NAME="${PARTS[0]}"
-            PACKAGE_VERSION="${PARTS[1]}"
+            pkg_name="${PARTS[0]}"
+            pkg_version="${PARTS[1]}"
             
-            echo "📦 Syncing $PACKAGE_NAME@$PACKAGE_VERSION"
+            echo "🔄 Syncing $pkg_name@$pkg_version"
             
-            # 创建临时目录
-            mkdir -p temp_sync
-            cd temp_sync
+            # 使用临时目录
+            mkdir temp_sync && cd temp_sync
             
-            # 从官方源下载包
-            npm pack "${PACKAGE_NAME}@${PACKAGE_VERSION}" --registry=https://registry.npmjs.org
-            
-            # 解压包
-            TARBALL=$(ls *.tgz)
-            tar -xf "$TARBALL"
-            
-            # 进入包目录并发布到目标仓库
+            # 下载和发布
+            npm pack "${pkg_name}@${pkg_version}" --registry=https://registry.npmjs.org
+            tar -xf *.tgz
             cd package
-            npm publish --registry="${{ github.event.inputs.target_registry }}" || echo "⚠️  Publish failed or package already exists: $PACKAGE_NAME@$PACKAGE_VERSION"
+            npm publish --loglevel=verbose
             
-            # 返回并清理
             cd ../..
             rm -rf temp_sync
-            
-            echo "✅ Completed: $PACKAGE_NAME@$PACKAGE_VERSION"
+            echo "✅ Synced: $pkg_name@$pkg_version"
           done
-          
-          echo "🎉 All packages synced successfully!"

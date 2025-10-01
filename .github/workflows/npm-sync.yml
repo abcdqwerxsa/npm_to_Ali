@@ -4,90 +4,74 @@ on:
   workflow_dispatch:
     inputs:
       package_list:
-        description: 'Package list (name:version,name:version)'
+        description: 'Package list (format: name:version,name:version)'
         required: true
-        default: 'n8n:1.112.6,express:4.18.2,lodash:4.17.21'
-
-env:
-  TARGET_REGISTRY: 'https://packages.aliyun.com/675f933120a07de19c7c12ea/npm/npm-registry/'
+        default: 'n8n:1.112.6,express:4.18.2'
+      target_registry:
+        description: 'Target registry URL'
+        required: true
+        default: 'https://packages.aliyun.com/675f933120a07de19c7c12ea/npm/npm-registry/'
 
 jobs:
   sync-packages:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '20'
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y jq
-
-      - name: Generate migration manifest
-        run: |
-          # 将输入的包列表转换为JSON格式
-          IFS=',' read -ra PACKAGES <<< "${{ github.event.inputs.package_list }}"
-          
-          echo '{ "packages": [' > migration-list.json
-          first=true
-          for package in "${PACKAGES[@]}"; do
-            IFS=':' read -ra parts <<< "$package"
-            name="${parts[0]}"
-            version="${parts[1]}"
-            
-            if [ "$first" = true ]; then
-              first=false
-            else
-              echo "," >> migration-list.json
-            fi
-            
-            cat >> migration-list.json << EOF
-            {
-              "name": "$name",
-              "versions": ["$version"]
-            }
-EOF
-          done
-          echo ']}' >> migration-list.json
-          
-          echo "Generated manifest:"
-          cat migration-list.json
-
-      - name: Create sync configuration
+      - name: Sync packages to target registry
         env:
           ALIYUN_TOKEN: ${{ secrets.ALIYUN_NPM_TOKEN }}
         run: |
-          # 创建同步配置
-          cat > sync-config.json << EOF
-          {
-            "source": "https://registry.npmjs.org",
-            "target": "$TARGET_REGISTRY",
-            "targetAuth": {
-              "token": "$ALIYUN_TOKEN"
-            },
-            "packages": $(cat migration-list.json | jq '.packages | map({(.name): .versions}) | add'),
-            "concurrency": 2,
-            "retries": 3
-          }
+          echo "Starting package sync..."
+          echo "Package list: ${{ github.event.inputs.package_list }}"
+          echo "Target registry: ${{ github.event.inputs.target_registry }}"
+          
+          # 创建 .npmrc 文件配置目标仓库认证
+          cat > .npmrc << EOF
+          registry=${{ github.event.inputs.target_registry }}
+          //packages.aliyun.com/675f933120a07de19c7c12ea/npm/npm-registry/:_authToken=$ALIYUN_TOKEN
+          always-auth=true
           EOF
           
-          echo "Sync configuration:"
-          cat sync-config.json
-
-      - name: Install sync tool and run
-        run: |
-          # 安装同步工具
-          npm install -g npm-registry-copy
+          # 分割包列表并逐个处理
+          IFS=',' read -ra PACKAGE_SPECS <<< "${{ github.event.inputs.package_list }}"
           
-          # 执行同步
-          npm-registry-copy --config sync-config.json
-
-      - name: Notify success
-        if: success()
-        run: |
-          echo "✅ Package sync completed successfully!"
+          for spec in "${PACKAGE_SPECS[@]}"; do
+            echo "Processing: $spec"
+            
+            # 分割包名和版本
+            IFS=':' read -ra PARTS <<< "$spec"
+            PACKAGE_NAME="${PARTS[0]}"
+            PACKAGE_VERSION="${PARTS[1]}"
+            
+            echo "📦 Syncing $PACKAGE_NAME@$PACKAGE_VERSION"
+            
+            # 创建临时目录
+            mkdir -p temp_sync
+            cd temp_sync
+            
+            # 从官方源下载包
+            npm pack "${PACKAGE_NAME}@${PACKAGE_VERSION}" --registry=https://registry.npmjs.org
+            
+            # 解压包
+            TARBALL=$(ls *.tgz)
+            tar -xf "$TARBALL"
+            
+            # 进入包目录并发布到目标仓库
+            cd package
+            npm publish --registry="${{ github.event.inputs.target_registry }}" || echo "⚠️  Publish failed or package already exists: $PACKAGE_NAME@$PACKAGE_VERSION"
+            
+            # 返回并清理
+            cd ../..
+            rm -rf temp_sync
+            
+            echo "✅ Completed: $PACKAGE_NAME@$PACKAGE_VERSION"
+          done
+          
+          echo "🎉 All packages synced successfully!"

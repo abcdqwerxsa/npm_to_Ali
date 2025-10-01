@@ -1,0 +1,86 @@
+name: NPM Package Sync
+
+on:
+  workflow_dispatch:
+    inputs:
+      package_list:
+        description: 'Package list (name:version,name:version)'
+        required: true
+        default: 'n8n:1.112.6,express:4.18.2,lodash:4.17.21'
+
+env:
+  TARGET_REGISTRY: 'https://packages.aliyun.com/675f933120a07de19c7c12ea/npm/npm-registry/'
+
+jobs:
+  sync-packages:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Generate migration manifest
+        run: |
+          # 将输入的包列表转换为JSON格式
+          IFS=',' read -ra PACKAGES <<< "${{ github.event.inputs.package_list }}"
+          
+          echo '{ "packages": [' > migration-list.json
+          first=true
+          for package in "${PACKAGES[@]}"; do
+            IFS=':' read -ra parts <<< "$package"
+            name="${parts[0]}"
+            version="${parts[1]}"
+            
+            if [ "$first" = true ]; then
+              first=false
+            else
+              echo "," >> migration-list.json
+            fi
+            
+            cat >> migration-list.json << EOF
+            {
+              "name": "$name",
+              "versions": ["$version"]
+            }
+            EOF
+          done
+          echo ']}' >> migration-list.json
+          
+          echo "Generated manifest:"
+          cat migration-list.json
+
+      - name: Sync packages using npm-registry-copy
+        env:
+          ALIYUN_TOKEN: ${{ secrets.ALIYUN_NPM_TOKEN }}
+        run: |
+          # 安装同步工具
+          npm install -g npm-registry-copy
+          
+          # 创建同步配置
+          cat > sync-config.json << EOF
+          {
+            "source": "https://registry.npmjs.org",
+            "target": "${{ env.TARGET_REGISTRY }}",
+            "targetAuth": {
+              "token": "$ALIYUN_TOKEN"
+            },
+            "packages": $(cat migration-list.json | jq '.packages | map({(.name): .versions}) | add'),
+            "concurrency": 2,
+            "retries": 3
+          }
+          EOF
+          
+          # 安装 jq 用于 JSON 处理
+          sudo apt-get install -y jq
+          
+          # 执行同步
+          npm-registry-copy --config sync-config.json
+
+      - name: Notify success
+        if: success()
+        run: |
+          echo "✅ Package sync completed successfully!"

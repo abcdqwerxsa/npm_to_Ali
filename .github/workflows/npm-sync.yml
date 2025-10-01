@@ -23,6 +23,11 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
       - name: Generate migration manifest
         run: |
           # 将输入的包列表转换为JSON格式
@@ -46,25 +51,22 @@ jobs:
               "name": "$name",
               "versions": ["$version"]
             }
-            EOF
+EOF
           done
           echo ']}' >> migration-list.json
           
           echo "Generated manifest:"
           cat migration-list.json
 
-      - name: Sync packages using npm-registry-copy
+      - name: Create sync configuration
         env:
           ALIYUN_TOKEN: ${{ secrets.ALIYUN_NPM_TOKEN }}
         run: |
-          # 安装同步工具
-          npm install -g npm-registry-copy
-          
           # 创建同步配置
           cat > sync-config.json << EOF
           {
             "source": "https://registry.npmjs.org",
-            "target": "${{ env.TARGET_REGISTRY }}",
+            "target": "$TARGET_REGISTRY",
             "targetAuth": {
               "token": "$ALIYUN_TOKEN"
             },
@@ -74,8 +76,13 @@ jobs:
           }
           EOF
           
-          # 安装 jq 用于 JSON 处理
-          sudo apt-get install -y jq
+          echo "Sync configuration:"
+          cat sync-config.json
+
+      - name: Install sync tool and run
+        run: |
+          # 安装同步工具
+          npm install -g npm-registry-copy
           
           # 执行同步
           npm-registry-copy --config sync-config.json
